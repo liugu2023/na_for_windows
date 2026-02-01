@@ -1,11 +1,20 @@
 import sys
 import os
+import requests
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QPushButton, QLabel, QStackedWidget,
-                             QLineEdit, QFrame, QSizePolicy)
+                             QLineEdit, QFrame, QSizePolicy, QProgressBar)
 from PyQt6.QtWebEngineWidgets import QWebEngineView
-from PyQt6.QtCore import QUrl, Qt, QSize
-from PyQt6.QtGui import QIcon, QFont, QAction
+from PyQt6.QtCore import QUrl, Qt, QSize, qInstallMessageHandler, QThread, pyqtSignal
+from PyQt6.QtGui import QIcon, QFont, QAction, QPixmap
+
+# --- 屏蔽 Qt 繁琐日志 ---
+def qt_message_handler(mode, context, message):
+    if "libpng warning" in message or "Accessibility" in message:
+        return
+    # print(f"[Qt] {message}")
+
+qInstallMessageHandler(qt_message_handler)
 
 # --- 样式表 (CSS) ---
 STYLESHEET = """
@@ -23,9 +32,11 @@ QPushButton.SidebarBtn {
     background-color: transparent;
     border: none;
     border-radius: 8px;
-    padding: 10px;
-    text-align: center;
+    padding: 0 15px;
+    text-align: left;
     color: #57606a;
+    font-size: 14px;
+    font-weight: 600;
 }
 QPushButton.SidebarBtn:hover {
     background-color: #f3f4f6;
@@ -51,6 +62,33 @@ QLineEdit#UrlBar {
     font-size: 13px;
 }
 
+/* 卡片按钮 */
+QPushButton#ActionBtn {
+    background-color: #ffffff;
+    border: 1px solid #d0d7de;
+    border-radius: 8px;
+    text-align: left;
+    padding: 15px;
+}
+QPushButton#ActionBtn:hover {
+    border-color: #0969da;
+    background-color: #f6f8fa;
+}
+QPushButton#ActionBtn:pressed {
+    background-color: #f3f4f6;
+}
+
+QLabel#ActionTitle {
+    font-size: 16px;
+    font-weight: bold;
+    color: #24292f;
+}
+QLabel#ActionDesc {
+    font-size: 12px;
+    color: #57606a;
+    margin-top: 4px;
+}
+
 /* 占位页 */
 QLabel#EmptyTitle {
     color: #24292f;
@@ -63,10 +101,49 @@ QLabel#EmptyDesc {
 }
 """
 
+# --- 自定义组件 ---
+
+class ActionButton(QPushButton):
+    def __init__(self, icon, title, desc, parent=None):
+        super().__init__(parent)
+        self.setObjectName("ActionBtn")
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFixedHeight(100)
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(20, 10, 20, 10)
+        layout.setSpacing(15)
+
+        # 图标
+        lbl_icon = QLabel(icon)
+        lbl_icon.setStyleSheet("font-size: 32px; border: none; background: transparent;")
+        layout.addWidget(lbl_icon)
+
+        # 文本区域
+        text_container = QWidget()
+        text_container.setStyleSheet("background: transparent; border: none;")
+        v_layout = QVBoxLayout(text_container)
+        v_layout.setContentsMargins(0, 5, 0, 5)
+        v_layout.setSpacing(2)
+
+        lbl_title = QLabel(title)
+        lbl_title.setObjectName("ActionTitle")
+        lbl_desc = QLabel(desc)
+        lbl_desc.setObjectName("ActionDesc")
+
+        v_layout.addWidget(lbl_title)
+        v_layout.addWidget(lbl_desc)
+        v_layout.addStretch()
+
+        layout.addWidget(text_container)
+        layout.addStretch()
+
+# --- 主窗口 ---
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("V-OS 部署工具")
+        self.setWindowTitle("Nekro-Agent 管理")
         self.resize(1000, 700)
         self.setStyleSheet(STYLESHEET)
 
@@ -80,17 +157,46 @@ class MainWindow(QMainWindow):
         # --- 1. 左侧侧边栏 ---
         self.sidebar = QFrame()
         self.sidebar.setObjectName("Sidebar")
-        self.sidebar.setFixedWidth(68)
+        self.sidebar.setFixedWidth(200)
         sidebar_layout = QVBoxLayout(self.sidebar)
         sidebar_layout.setContentsMargins(10, 20, 10, 20)
         sidebar_layout.setSpacing(10)
 
         # Logo
-        logo_label = QLabel("V")
-        logo_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        logo_label.setStyleSheet("background-color: #24292f; color: white; border-radius: 8px; font-weight: bold; font-size: 20px;")
-        logo_label.setFixedSize(40, 40)
-        sidebar_layout.addWidget(logo_label, 0, Qt.AlignmentFlag.AlignHCenter)
+        logo_layout = QHBoxLayout()
+        logo_label = QLabel()
+        logo_label.setFixedSize(32, 32)
+        logo_label.setScaledContents(True)
+
+        logo_text = QLabel("Nekro Agent")
+        logo_text.setStyleSheet("font-size: 16px; font-weight: bold; color: #24292f; margin-left: 8px;")
+
+        # 加载图标 (优先加载 png，其次 webp)
+        icon_path_png = "NekroAgent.png"
+        icon_path_webp = "NekroAgent.webp"
+
+        final_icon_path = None
+        if os.path.exists(icon_path_png):
+            final_icon_path = icon_path_png
+        elif os.path.exists(icon_path_webp):
+            final_icon_path = icon_path_webp
+
+        if final_icon_path:
+            self.setWindowIcon(QIcon(final_icon_path)) # 设置窗口图标
+            pixmap = QPixmap(final_icon_path)
+            if not pixmap.isNull():
+                logo_label.setPixmap(pixmap)
+                logo_label.setStyleSheet("background: transparent;")
+            else:
+                self._set_fallback_logo(logo_label)
+        else:
+            self._set_fallback_logo(logo_label)
+
+        logo_layout.addWidget(logo_label)
+        logo_layout.addWidget(logo_text)
+        logo_layout.addStretch()
+
+        sidebar_layout.addLayout(logo_layout)
 
         sidebar_layout.addSpacing(20)
 
@@ -126,25 +232,27 @@ class MainWindow(QMainWindow):
         # 默认显示主页
         self.switch_tab(0)
 
-    def create_sidebar_btn(self, icon_text, tooltip):
-        btn = QPushButton(icon_text)
-        btn.setObjectName("SidebarBtn")
-        btn.setToolTip(tooltip)
-        btn.setCheckable(True)
-        btn.setFixedSize(44, 44)
-        btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        # 设置字体大小以显示 Emoji
-        font = QFont()
-        font.setPointSize(16)
-        btn.setFont(font)
+    def _set_fallback_logo(self, label):
+        label.setText("N")
+        label.setStyleSheet("background-color: #24292f; color: white; border-radius: 8px; font-weight: bold; font-size: 20px;")
+        label.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-        # 绑定点击事件 (需要配合 lambda 传递 index，这里简单根据 tooltip 判断)
+    def create_sidebar_btn(self, icon_text, text):
+        # 按钮文字包含图标和描述
+        btn = QPushButton(f"  {icon_text}   {text}")
+        btn.setObjectName("SidebarBtn")
+        # 此时 text 即为 tooltip/ID
+        btn.setCheckable(True)
+        btn.setFixedHeight(44)
+        btn.setCursor(Qt.CursorShape.PointingHandCursor)
+
+        # 绑定点击事件
         index_map = {
             "项目概览": 0, "应用浏览器": 1, "运行日志": 2,
             "文件管理": 3, "系统设置": 4
         }
-        if tooltip in index_map:
-            btn.clicked.connect(lambda: self.switch_tab(index_map[tooltip]))
+        if text in index_map:
+            btn.clicked.connect(lambda: self.switch_tab(index_map[text]))
 
         return btn
 
@@ -161,17 +269,61 @@ class MainWindow(QMainWindow):
     def init_home_page(self):
         page = QWidget()
         layout = QVBoxLayout(page)
+        layout.setContentsMargins(40, 40, 40, 40)
+        layout.setSpacing(20)
 
-        # 标题栏
-        header = QLabel("项目概览")
-        header.setStyleSheet("font-size: 18px; font-weight: bold; color: #24292f; margin: 20px;")
-        layout.addWidget(header)
+        # 1. 顶部状态区
+        header_layout = QHBoxLayout()
 
-        # 内容
-        content = QLabel("右侧内容区域留空\n等待具体功能模块嵌入")
-        content.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        content.setStyleSheet("color: #8b949e; font-size: 16px;")
-        layout.addWidget(content)
+        # 标题
+        title_box = QVBoxLayout()
+        lbl_title = QLabel("Nekro-Agent 环境管理")
+        lbl_title.setStyleSheet("font-size: 24px; font-weight: bold; color: #24292f;")
+        lbl_status = QLabel("● 当前状态: 未启动")
+        lbl_status.setStyleSheet("font-size: 14px; color: #cf222e; margin-top: 5px;") # 默认红色
+        title_box.addWidget(lbl_title)
+        title_box.addWidget(lbl_status)
+
+        header_layout.addLayout(title_box)
+        header_layout.addStretch()
+
+        layout.addLayout(header_layout)
+        layout.addSpacing(20)
+
+        # 2. 功能按钮区 (Grid Layout)
+        from PyQt6.QtWidgets import QGridLayout
+        grid = QGridLayout()
+        grid.setSpacing(20)
+
+        # 按钮 0: 下载系统镜像
+        btn_download = ActionButton("📥", "下载系统镜像", "从云端获取最新虚拟机镜像")
+        grid.addWidget(btn_download, 0, 0)
+
+        # 按钮 1: 一键部署
+        btn_deploy = ActionButton("🚀", "一键部署", "启动虚拟机并运行 Docker 服务")
+        btn_deploy.setStyleSheet("""
+            QPushButton#ActionBtn { border: 1px solid #2da44e; background-color: #f6fff8; }
+            QPushButton#ActionBtn:hover { background-color: #e6ffec; }
+        """)
+        grid.addWidget(btn_deploy, 0, 1)
+
+        # 按钮 2: 检查更新
+        btn_update = ActionButton("🔄", "检查更新", "拉取最新镜像并重启服务")
+        grid.addWidget(btn_update, 1, 0)
+
+        # 按钮 3: 卸载清除
+        btn_uninstall = ActionButton("🗑️", "卸载清除", "删除容器、镜像及数据")
+        btn_uninstall.setStyleSheet("""
+            QPushButton#ActionBtn:hover { border-color: #cf222e; background-color: #fff8f8; }
+        """)
+        grid.addWidget(btn_uninstall, 1, 1)
+
+        # 按钮 4: 项目主页 (跨两列)
+        btn_web = ActionButton("🏠", "项目主页", "访问官方文档与社区")
+        grid.addWidget(btn_web, 2, 0, 1, 2)
+
+        layout.addLayout(grid)
+        layout.addStretch() # 底部留白
 
         self.stack.addWidget(page)
 
@@ -215,8 +367,12 @@ class MainWindow(QMainWindow):
 
         # WebEngineView
         self.webview = QWebEngineView()
-        # 加载一个默认页面
-        self.webview.setUrl(QUrl("https://mirrors.aliyun.com/alpine/"))
+        # 默认不加载 URL (留白)
+        self.webview.setHtml("""
+            <html><body style='background-color:#f6f8fa; display:flex; justify-content:center; align-items:center; height:100vh; font-family:sans-serif; color:#8b949e;'>
+            <h2>请先启动服务</h2>
+            </body></html>
+        """)
         layout.addWidget(self.webview)
 
         # 绑定浏览器事件
