@@ -1,0 +1,82 @@
+# Nekro-Agent Docker Compose with Napcat (V-OS 预打包版)
+# 所有数据持久化到共享目录 /mnt/host_share/nekro_data
+
+version: "3"
+
+services:
+  # PostgreSQL 服务
+  nekro_postgres:
+    image: postgres:14
+    container_name: nekro_postgres
+    environment:
+      POSTGRES_USER: nekro_agent
+      POSTGRES_PASSWORD: nekro_agent
+      POSTGRES_DB: nekro_agent
+    volumes:
+      - /mnt/host_share/nekro_data/postgres:/var/lib/postgresql/data
+    networks:
+      - nekro_network
+    restart: unless-stopped
+
+  # Qdrant 服务
+  nekro_qdrant:
+    image: qdrant/qdrant
+    container_name: nekro_qdrant
+    environment:
+      - QDRANT__SERVICE__API_KEY=${QDRANT_API_KEY:-}
+    volumes:
+      - /mnt/host_share/nekro_data/qdrant:/qdrant/storage:z
+    networks:
+      - nekro_network
+    restart: unless-stopped
+
+  # 主服务
+  nekro_agent:
+    image: kromiose/nekro-agent:latest
+    container_name: nekro_agent
+    environment:
+      - NEKRO_INSTANCE_NAME=nekro_agent
+      - NEKRO_DATA_DIR=/mnt/host_share/nekro_data
+      - NEKRO_EXPOSE_PORT=8021
+      - NEKRO_POSTGRES_HOST=nekro_postgres
+      - NEKRO_POSTGRES_PORT=5432
+      - NEKRO_POSTGRES_USER=nekro_agent
+      - NEKRO_POSTGRES_PASSWORD=nekro_agent
+      - NEKRO_POSTGRES_DATABASE=nekro_agent
+      - NEKRO_RUN_IN_DOCKER=true
+      - NEKRO_ADMIN_PASSWORD=${NEKRO_ADMIN_PASSWORD:-}
+      - ONEBOT_ACCESS_TOKEN=${ONEBOT_ACCESS_TOKEN:-}
+      - NEKRO_QDRANT_URL=http://nekro_qdrant:6333
+      - NEKRO_QDRANT_API_KEY=${QDRANT_API_KEY:-}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /mnt/host_share/nekro_data:/mnt/host_share/nekro_data:rw
+    depends_on:
+      - nekro_postgres
+      - nekro_qdrant
+    ports:
+      - "8021:8021"
+    networks:
+      - nekro_network
+    restart: unless-stopped
+
+  # Napcat 服务
+  nekro_napcat:
+    image: mlikiowa/napcat-docker
+    container_name: nekro_napcat
+    hostname: nekro-v-os-device
+    mac_address: 02:42:ac:11:00:99
+    ports:
+      - "6099:6099"
+    volumes:
+      - /mnt/host_share/nekro_data:/app/nekro_agent_data
+      - /mnt/host_share/nekro_data/napcat_data/QQ:/app/.config/QQ
+      - /mnt/host_share/nekro_data/napcat_data/napcat:/app/napcat/config
+    networks:
+      - nekro_network
+    restart: unless-stopped
+
+networks:
+  nekro_network:
+    name: nekro_network
+    driver: bridge

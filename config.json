@@ -1,0 +1,6 @@
+{
+    "shared_dir": "shared",
+    "autostart": false,
+    "first_run": true,
+    "last_iso": "alpine-docker-napcat.iso"
+}

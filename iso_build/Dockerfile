@@ -9,7 +9,10 @@ RUN apk add --no-cache \
     dosfstools \
     findutils \
     bash \
-    sed
+    sed \
+    docker-cli \
+    cpio \
+    gzip
 
 # Copy the build script
 COPY gen_iso.sh /gen_iso.sh
