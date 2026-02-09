@@ -41,6 +41,37 @@ class VMManager(QObject):
         self.is_windows = platform.system() == "Windows"
         self.whpx_available = None  # 缓存 WHPX 检测结果
 
+    def find_available_port(self, start_port, max_attempts=10):
+        """查找可用端口"""
+        for offset in range(max_attempts):
+            port = start_port + offset
+            try:
+                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                s.settimeout(1)
+                s.bind(('127.0.0.1', port))
+                s.close()
+                return port
+            except OSError:
+                continue
+        return None
+
+    def kill_process_on_port(self, port):
+        """尝试终止占用指定端口的进程"""
+        try:
+            for conn in psutil.net_connections():
+                if conn.laddr.port == port and conn.status == 'LISTEN':
+                    try:
+                        proc = psutil.Process(conn.pid)
+                        proc.terminate()
+                        proc.wait(timeout=3)
+                        self.log_received.emit(f"已终止占用端口 {port} 的进程 (PID: {conn.pid})", "info")
+                        return True
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        return False
+
     def check_whpx_available(self):
         """检测 Windows WHPX 硬件加速是否可用（实际测试启动）"""
         if self.whpx_available is not None:
@@ -138,6 +169,38 @@ class VMManager(QObject):
                 os.remove(p)
 
         cores, mem = self.get_auto_resources()
+
+        # 检查并获取可用的串口端口
+        serial_port = self.find_available_port(self.serial_port)
+        if serial_port is None:
+            # 尝试终止占用端口的进程
+            self.log_received.emit(f"端口 {self.serial_port} 被占用，尝试释放...", "warn")
+            self.kill_process_on_port(self.serial_port)
+            time.sleep(1)
+            serial_port = self.find_available_port(self.serial_port)
+
+        if serial_port is None:
+            self.log_received.emit(f"无法获取可用的串口端口", "error")
+            return False
+
+        if serial_port != self.serial_port:
+            self.log_received.emit(f"使用备用串口端口: {serial_port}", "info")
+        self.serial_port = serial_port
+
+        # 检查 Docker 端口
+        docker_port = self.find_available_port(self.host_port)
+        if docker_port is None:
+            self.kill_process_on_port(self.host_port)
+            time.sleep(1)
+            docker_port = self.find_available_port(self.host_port)
+
+        if docker_port is None:
+            self.log_received.emit(f"无法获取可用的 Docker 端口", "error")
+            return False
+
+        if docker_port != self.host_port:
+            self.log_received.emit(f"使用备用 Docker 端口: {docker_port}", "info")
+        self.host_port = docker_port
 
         # 转换路径为 QEMU 兼容格式
         iso_path_qemu = self.normalize_path_for_qemu(iso_path)
