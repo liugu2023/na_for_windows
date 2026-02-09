@@ -1,9 +1,23 @@
 import json
 import os
+import sys
+
 
 class ConfigManager:
-    def __init__(self, config_path="config.json"):
-        self.config_path = config_path
+    def __init__(self, config_path=None):
+        # 确定基础路径
+        if getattr(sys, 'frozen', False):
+            self.base_path = os.path.dirname(sys.executable)
+        else:
+            self.base_path = os.path.dirname(os.path.abspath(__file__))
+            if self.base_path.endswith('core'):
+                self.base_path = os.path.dirname(self.base_path)
+
+        if config_path:
+            self.config_path = config_path
+        else:
+            self.config_path = os.path.join(self.base_path, "config.json")
+
         self.default_config = {
             "shared_dir": "shared",
             "autostart": False,
@@ -17,16 +31,16 @@ class ConfigManager:
             try:
                 with open(self.config_path, "r", encoding="utf-8") as f:
                     return {**self.default_config, **json.load(f)}
-            except:
-                return self.default_config
-        return self.default_config
+            except Exception:
+                return self.default_config.copy()
+        return self.default_config.copy()
 
     def save_config(self):
         try:
             with open(self.config_path, "w", encoding="utf-8") as f:
                 json.dump(self.config, f, indent=4, ensure_ascii=False)
             return True
-        except:
+        except Exception:
             return False
 
     def get(self, key):
@@ -35,3 +49,10 @@ class ConfigManager:
     def set(self, key, value):
         self.config[key] = value
         self.save_config()
+
+    def get_absolute_path(self, key):
+        """获取配置中路径的绝对路径"""
+        value = self.get(key)
+        if value and not os.path.isabs(value):
+            return os.path.join(self.base_path, value)
+        return value

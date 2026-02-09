@@ -2,10 +2,10 @@ import os
 from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                              QPushButton, QLabel, QStackedWidget, QLineEdit,
                              QFrame, QGridLayout, QComboBox, QTextEdit,
-                             QCheckBox, QFileDialog)
+                             QCheckBox, QFileDialog, QMessageBox)
 from PyQt6.QtWebEngineWidgets import QWebEngineView
 from PyQt6.QtCore import QUrl, Qt
-from PyQt6.QtGui import QIcon, QPixmap
+from PyQt6.QtGui import QIcon, QPixmap, QCloseEvent
 
 from ui.styles import STYLESHEET
 from ui.widgets import ActionButton
@@ -144,6 +144,11 @@ class MainWindow(QMainWindow):
         self.stack.addWidget(page)
 
     def start_deploy(self):
+        """启动部署流程"""
+        if self.vm.is_running:
+            QMessageBox.information(self, "提示", "虚拟机已在运行中")
+            return
+
         # 扫描 ISO 镜像
         iso_dir = os.path.join(self.vm.base_path, "v-core")
         if not os.path.exists(iso_dir):
@@ -152,7 +157,6 @@ class MainWindow(QMainWindow):
         isos = [f for f in os.listdir(iso_dir) if f.endswith(".iso")]
 
         if not isos:
-            from PyQt6.QtWidgets import QMessageBox
             QMessageBox.critical(self, "错误", "未在 v-core 目录发现任何 ISO 镜像文件")
             return
 
@@ -181,10 +185,19 @@ class MainWindow(QMainWindow):
 
         full_iso_path = os.path.join(iso_dir, selected_iso)
 
+        # 获取共享目录配置
+        shared_dir = self.config.get("shared_dir")
+        if shared_dir and not os.path.isabs(shared_dir):
+            # 转换为绝对路径
+            shared_dir = os.path.join(self.vm.base_path, shared_dir)
+
         # 切换到日志页查看进度
         self.switch_tab(2)
-        # 启动虚拟机 (正确传递参数)
-        self.vm.start_vm(iso_path=full_iso_path, custom_shared_dir=self.config.get("shared_dir"))
+        self.log_viewer.clear()
+        self.log_viewer.append(f"<span style='color:#7ee787;'>[INFO]</span> 开始启动虚拟机...")
+
+        # 启动虚拟机
+        self.vm.start_vm(iso_path=full_iso_path, custom_shared_dir=shared_dir)
 
     def update_status_ui(self, status):
         self.lbl_status.setText(f"● 当前状态: {status}")
@@ -263,3 +276,20 @@ class MainWindow(QMainWindow):
         page = QWidget(); layout = QVBoxLayout(page); layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(QLabel(f"<h3>{title}</h3> 模块开发中..."))
         self.stack.addWidget(page)
+
+    def closeEvent(self, event: QCloseEvent):
+        """窗口关闭时停止虚拟机"""
+        if self.vm.is_running:
+            reply = QMessageBox.question(
+                self, "确认退出",
+                "虚拟机正在运行，退出将停止虚拟机。确定要退出吗？",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No
+            )
+            if reply == QMessageBox.StandardButton.Yes:
+                self.vm.stop_vm()
+                event.accept()
+            else:
+                event.ignore()
+        else:
+            event.accept()
