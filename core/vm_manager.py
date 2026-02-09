@@ -42,7 +42,7 @@ class VMManager(QObject):
         self.whpx_available = None  # 缓存 WHPX 检测结果
 
     def check_whpx_available(self):
-        """检测 Windows WHPX 硬件加速是否可用"""
+        """检测 Windows WHPX 硬件加速是否可用（实际测试启动）"""
         if self.whpx_available is not None:
             return self.whpx_available
 
@@ -51,17 +51,24 @@ class VMManager(QObject):
             return False
 
         try:
-            # 尝试运行 QEMU 检测 WHPX
+            # 实际尝试用 WHPX 启动一个最小化的 QEMU 实例来验证
             result = subprocess.run(
-                [self.qemu_path, "-accel", "help"],
+                [self.qemu_path, "-accel", "whpx", "-machine", "q35", "-m", "64", "-display", "none", "-S"],
                 capture_output=True, text=True, timeout=5,
                 cwd=self.qemu_dir, creationflags=subprocess.CREATE_NO_WINDOW
             )
-            self.whpx_available = "whpx" in result.stdout.lower()
-            if self.whpx_available:
-                self.log_received.emit("检测到 WHPX 硬件加速支持", "info")
+            # 如果没有报错且退出码为0，说明 WHPX 可用
+            # 注意：这个命令会因为 -S（暂停启动）而立即退出
+            if result.returncode == 0 or "whpx" not in result.stderr.lower():
+                self.whpx_available = True
+                self.log_received.emit("WHPX 硬件加速验证通过", "info")
             else:
-                self.log_received.emit("未检测到 WHPX，将使用软件模拟（较慢）", "warn")
+                self.whpx_available = False
+                self.log_received.emit(f"WHPX 不可用: {result.stderr[:100]}", "warn")
+        except subprocess.TimeoutExpired:
+            # 超时说明 QEMU 成功启动了（被 -S 暂停）
+            self.whpx_available = True
+            self.log_received.emit("WHPX 硬件加速可用", "info")
         except Exception as e:
             self.log_received.emit(f"WHPX 检测失败: {e}", "debug")
             self.whpx_available = False
@@ -141,11 +148,14 @@ class VMManager(QObject):
         cmd = [self.qemu_path, "-L", qemu_dir_qemu, "-m", str(mem)]
 
         # 检测并启用硬件加速
-        if self.check_whpx_available():
-            cmd.extend(["-accel", "whpx", "-cpu", "max"])
+        use_whpx = self.check_whpx_available()
+        if use_whpx:
+            # WHPX 使用 qemu64 CPU 模型更稳定，max 可能导致兼容性问题
+            cmd.extend(["-accel", "whpx,kernel-irqchip=off", "-cpu", "qemu64"])
             self.log_received.emit("启用 WHPX 硬件加速", "info")
         else:
-            cmd.extend(["-cpu", "qemu64"])
+            cmd.extend(["-accel", "tcg", "-cpu", "qemu64"])
+            self.log_received.emit("使用 TCG 软件模拟", "info")
 
         # 添加其他参数
         cmd.extend([
@@ -166,10 +176,11 @@ class VMManager(QObject):
         self.log_received.emit(f"启动指令: {' '.join(cmd)}", "debug")
 
         try:
-            # Windows 平台使用新控制台窗口
+            # Windows 平台捕获 stderr 以便诊断错误
             popen_kwargs = {
-                "text": True,
-                "cwd": self.base_path
+                "cwd": self.base_path,
+                "stderr": subprocess.PIPE,
+                "stdout": subprocess.PIPE,
             }
             if self.is_windows:
                 popen_kwargs["creationflags"] = subprocess.CREATE_NEW_CONSOLE
@@ -179,7 +190,7 @@ class VMManager(QObject):
             self.status_changed.emit("启动中...")
             threading.Thread(target=self._log_reader, daemon=True).start()
             threading.Thread(target=self._wait_for_docker, args=(target_shared,), daemon=True).start()
-            threading.Thread(target=self._monitor_process, daemon=True).start()
+            threading.Thread(target=self._monitor_process, args=(use_whpx, target_shared), daemon=True).start()
             return True
         except FileNotFoundError:
             self.log_received.emit(f"错误: 找不到 QEMU 可执行文件", "error")
@@ -291,11 +302,38 @@ class VMManager(QObject):
             if s:
                 s.close()
 
-    def _monitor_process(self):
-        """监控QEMU进程，只有进程真正退出才更新状态"""
-        if self.vm_process:
-            self.vm_process.wait()
-            self.is_running = False
+    def _monitor_process(self, used_whpx=False, shared_dir=None):
+        """监控QEMU进程，检测异常退出并尝试回退"""
+        if not self.vm_process:
+            return
+
+        # 读取 stderr 输出
+        stderr_output = ""
+        try:
+            if self.vm_process.stderr:
+                stderr_output = self.vm_process.stderr.read().decode('utf-8', errors='ignore')
+        except Exception:
+            pass
+
+        exit_code = self.vm_process.wait()
+        was_running = self.is_running
+        self.is_running = False
+
+        if was_running and exit_code != 0:
+            self.log_received.emit(f"QEMU 异常退出，退出码: {exit_code}", "error")
+            if stderr_output:
+                # 只显示前500字符避免日志过长
+                self.log_received.emit(f"错误信息: {stderr_output[:500]}", "error")
+
+            # 如果使用了 WHPX 且失败，尝试回退到 TCG
+            if used_whpx:
+                self.log_received.emit("WHPX 启动失败，尝试回退到软件模拟...", "warn")
+                self.whpx_available = False  # 禁用 WHPX
+                # 注意：这里不自动重启，让用户手动重试
+                self.status_changed.emit("WHPX失败，请重试")
+            else:
+                self.status_changed.emit("启动失败")
+        else:
             self.status_changed.emit("已停止")
 
     def stop_vm(self):
